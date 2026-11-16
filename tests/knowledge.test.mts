@@ -40,9 +40,10 @@ test("allowed domains are normalised and validated", () => {
 
 import { rankModels } from "../src/lib/models.ts";
 
-test("model discovery prefers stable, full flash, newest", () => {
+test("model discovery: lite first, newest first, an older fallback kept", () => {
   const names = ["models/gemini-2.5-flash", "models/gemini-3.5-flash", "models/gemini-3.8-flash-preview", "models/gemini-3.5-flash-lite",
-    "models/gemini-3.8-flash-tts", "models/gemini-2.5-pro", "models/text-embedding-004", "models/gemini-3.5-flash-image"];
-  assert.deepEqual(rankModels(names), ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash-preview"]);
+    "models/gemini-3.8-flash", "models/gemini-3.8-flash-lite", "models/gemini-3.8-flash-tts", "models/gemini-2.5-pro", "models/text-embedding-004"];
+  assert.deepEqual(rankModels(names), ["gemini-3.8-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash"]);
+  assert.deepEqual(rankModels(names, 3), ["gemini-3.8-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]);
   assert.deepEqual(rankModels([]), []);
 });

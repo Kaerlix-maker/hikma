@@ -27,7 +27,7 @@ async function models(): Promise<string[]> {
     });
     const body = (await r.json()) as { models?: { name: string; supportedGenerationMethods?: string[] }[] };
     const usable = (body.models ?? []).filter((m) => m.supportedGenerationMethods?.includes("generateContent")).map((m) => m.name);
-    const ranked = rankModels(usable).slice(0, 3);
+    const ranked = rankModels(usable, 5);
     if (ranked.length) cached = { at: Date.now(), models: ranked };
     else console.error("No usable Gemini models", r.status, JSON.stringify(body).slice(0, 300));
   } catch (e) {
@@ -47,16 +47,24 @@ export type Turn = { role: "user" | "model"; text: string };
  * Gemini 2.x uses a token budget, Gemini 3+ uses a level.
  */
 const lowThinking = (model: string) =>
-  /gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: ThinkingLevel.MINIMAL };
+  /gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: ThinkingLevel.LOW };
 
-/** JSON-mode call: model fallback, 12 s per attempt, 25 s in total. */
+/**
+ * JSON-mode call with fallbacks. Per model, up to three tries — each drops an
+ * option the model may reject (400): low thinking → strict schema → plain JSON.
+ * Overloaded (503), rate-limited (429) or slow models are skipped quickly.
+ */
 export async function generateJson(system: string, turns: Turn[], schema: object): Promise<unknown> {
   if (!aiEnabled()) throw new AiUnavailable("not configured");
-  const deadline = Date.now() + 25_000;
+  const deadline = Date.now() + 28_000;
   let last: unknown;
+  const variants = [
+    { schema: true, thinking: true },
+    { schema: true, thinking: false },
+    { schema: false, thinking: false },
+  ];
   for (const model of await models()) {
-    // 1st try: strict JSON schema + low thinking. If the model rejects an option (400), retry plain.
-    for (const strict of [true, false]) {
+    for (const v of variants) {
       const left = deadline - Date.now();
       if (left < 2000) break;
       const started = Date.now();
@@ -65,20 +73,21 @@ export async function generateJson(system: string, turns: Turn[], schema: object
           model,
           contents: turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
           config: {
-            systemInstruction: strict ? system : `${system}\n\nRespond with JSON only, matching this JSON Schema:\n${JSON.stringify(schema)}`,
+            systemInstruction: v.schema ? system : `${system}\n\nRespond with JSON only, matching this JSON Schema:\n${JSON.stringify(schema)}`,
             temperature: 0.2,
             maxOutputTokens: 1024,
             responseMimeType: "application/json",
-            ...(strict ? { responseJsonSchema: schema, thinkingConfig: lowThinking(model) } : {}),
-            abortSignal: AbortSignal.timeout(Math.min(12_000, left)),
+            ...(v.schema ? { responseJsonSchema: schema } : {}),
+            ...(v.thinking ? { thinkingConfig: lowThinking(model) } : {}),
+            abortSignal: AbortSignal.timeout(Math.min(9_000, left)),
           },
         });
         return JSON.parse(res.text ?? "");
       } catch (e) {
         last = e;
         const status = (e as { status?: number }).status;
-        console.warn(`Gemini attempt failed: model=${model} strict=${strict} status=${status ?? "-"} after ${Date.now() - started}ms: ${String((e as Error).message ?? e).slice(0, 200)}`);
-        if (status !== 400) break; // 404 / 429 / timeout / 5xx → next model
+        console.warn(`Gemini attempt failed: model=${model} schema=${v.schema} thinking=${v.thinking} status=${status ?? "-"} after ${Date.now() - started}ms: ${String((e as Error).message ?? e).slice(0, 160)}`);
+        if (status !== 400) break; // 404 / 429 / 503 / timeout → next model
       }
     }
   }
