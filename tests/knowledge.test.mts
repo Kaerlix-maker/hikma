@@ -37,3 +37,12 @@ test("allowed domains are normalised and validated", () => {
   assert.equal(normalizeOrigin("shop.com; script-src *"), null);   // no CSP injection
   assert.equal(normalizeOrigin("http://localhost:3000"), "http://localhost:3000");
 });
+
+import { rankModels } from "../src/lib/models.ts";
+
+test("model discovery prefers stable, full flash, newest", () => {
+  const names = ["models/gemini-2.5-flash", "models/gemini-3.5-flash", "models/gemini-3.8-flash-preview", "models/gemini-3.5-flash-lite",
+    "models/gemini-3.8-flash-tts", "models/gemini-2.5-pro", "models/text-embedding-004", "models/gemini-3.5-flash-image"];
+  assert.deepEqual(rankModels(names), ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash-preview"]);
+  assert.deepEqual(rankModels([]), []);
+});
