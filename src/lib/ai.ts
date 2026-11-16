@@ -1,6 +1,6 @@
 import "server-only";
 import { createHash } from "node:crypto";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import { headers } from "next/headers";
 import { env } from "@/lib/env";
 import { rankModels } from "@/lib/models";
@@ -41,14 +41,25 @@ export class AiUnavailable extends Error {}
 export type Turn = { role: "user" | "model"; text: string };
 
 /** JSON-mode call with model fallback and an overall 20 s budget. */
+/**
+ * "Thinking" makes Flash models slow (and eats the output budget); a support
+ * chat needs fast, short answers, so we turn it down to the minimum.
+ * Gemini 2.x uses a token budget, Gemini 3+ uses a level.
+ */
+const lowThinking = (model: string) =>
+  /gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: ThinkingLevel.MINIMAL };
+
+/** JSON-mode call: model fallback, 12 s per attempt, 25 s in total. */
 export async function generateJson(system: string, turns: Turn[], schema: object): Promise<unknown> {
   if (!aiEnabled()) throw new AiUnavailable("not configured");
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + 25_000;
   let last: unknown;
   for (const model of await models()) {
-    // Try strict JSON-schema mode first; if the model rejects it (400), retry with plain JSON mode.
+    // 1st try: strict JSON schema + low thinking. If the model rejects an option (400), retry plain.
     for (const strict of [true, false]) {
-      if (Date.now() > deadline) break;
+      const left = deadline - Date.now();
+      if (left < 2000) break;
+      const started = Date.now();
       try {
         const res = await ai().models.generateContent({
           model,
@@ -56,16 +67,18 @@ export async function generateJson(system: string, turns: Turn[], schema: object
           config: {
             systemInstruction: strict ? system : `${system}\n\nRespond with JSON only, matching this JSON Schema:\n${JSON.stringify(schema)}`,
             temperature: 0.2,
-            maxOutputTokens: 700,
+            maxOutputTokens: 1024,
             responseMimeType: "application/json",
-            ...(strict ? { responseJsonSchema: schema } : {}),
-            abortSignal: AbortSignal.timeout(Math.max(1000, deadline - Date.now())),
+            ...(strict ? { responseJsonSchema: schema, thinkingConfig: lowThinking(model) } : {}),
+            abortSignal: AbortSignal.timeout(Math.min(12_000, left)),
           },
         });
         return JSON.parse(res.text ?? "");
       } catch (e) {
         last = e;
-        if ((e as { status?: number }).status !== 400) break; // 404/429/5xx → next model
+        const status = (e as { status?: number }).status;
+        console.warn(`Gemini attempt failed: model=${model} strict=${strict} status=${status ?? "-"} after ${Date.now() - started}ms: ${String((e as Error).message ?? e).slice(0, 200)}`);
+        if (status !== 400) break; // 404 / 429 / timeout / 5xx → next model
       }
     }
   }
